@@ -1,17 +1,9 @@
-Name: [Not found]
-Affiliation: [Not found]
-Department: [Not found]
+Name: Kevin B.
+Affiliation: D'Amore-McKim School of Business at Northeastern University
+Department: Professor
 
-Work Skills: 
-Personal Skills: 
+Work Skills: Strategy, Analytics, Statistics, Economics, Start-ups, Design Of Experiments
+Personal Skills: Research, Consulting, Entrepreneurship, Mobile Devices, Inferred
 
 Bio:
-Name: Sarah Chen
-Affiliation: Tech Solutions Co.
-Department: Research and Development
-Work Interests: Artificial Intelligence, Machine Learning, Data Analysis
-Personal Interests: Traveling, Photography, Cooking
-Education: Bachelor's in Computer Science
-Honors: Top Performer Award 2020
-
-Sarah is a passionate tech enthusiast with a love for exploring new cultures through travel and capturing moments behind the lens. She brings her expertise in AI and data analysis to her role in R&D, where she continues to push boundaries and drive innovation. With a Bachelor's in Computer Science and a knack for cooking up new ideas, Sarah is always ready for the next challenge.
+I teach and research in the field of business strategy and analytics.

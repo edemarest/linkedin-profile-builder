@@ -27,9 +27,8 @@ async function callLinkedInApi(endpoint, params = {}) {
     console.log(`ERROR: API ${endpoint} failed (${res.status}):`, text);
     throw new Error(`HTTP ${res.status}: ${text}`);
   }
-  return res.headers.get('content-type').includes('application/pdf')
-    ? await res.arrayBuffer()
-    : await res.json();
+  // fresh-linkedin-scraper-api returns JSON for all endpoints
+  return await res.json();
 }
 
 module.exports = { callLinkedInApi };
