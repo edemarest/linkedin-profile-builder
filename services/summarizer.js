@@ -148,6 +148,9 @@ async function synthesizePersonalProfile(items, opts = {}) {
       clusterSummaries.push({ summary: summary.trim(), reps });
     }
 
+    // Combine cluster summaries into a single text used for deterministic extraction and final synthesis
+    const combined = clusterSummaries.map(c => c.summary).join('\n');
+
     // Before final synthesis: try to extract deterministic seed interests from cluster summaries
     let seedInterests = [];
     try {
@@ -160,9 +163,9 @@ async function synthesizePersonalProfile(items, opts = {}) {
     } catch (e) {
       seedInterests = [];
     }
-    // Fallback heuristic: simple token frequency
+    // Fallback heuristic: simple token frequency from combined text
     if (!seedInterests || seedInterests.length === 0) {
-      const stop = new Set(['the','and','a','an','in','on','with','for','of','to','by','from','my','we','I','is','are','this','that','be','as','at','about']);
+      const stop = new Set(['the','and','a','an','in','on','with','for','of','to','by','from','my','we','i','is','are','this','that','be','as','at','about']);
       const tokens = combined.split(/[^A-Za-z\-]+/).map(t => t.trim()).filter(t => t && t.length>2).map(t => t.toLowerCase());
       const counts = {};
       for (const tk of tokens) if (!stop.has(tk)) counts[tk] = (counts[tk] || 0) + 1;
@@ -171,15 +174,78 @@ async function synthesizePersonalProfile(items, opts = {}) {
     }
 
     // Synthesize final JSON from cluster summaries
-    const combined = clusterSummaries.map(c => c.summary).join('\n');
     const finalPrompt = `You are given short cluster summaries of a user's posts/comments (one per line):\n${combined}\n\nReturn strict JSON: { "personalSummary": "...", "personalInterests": ["..."], "evidence": [{"id":"...","sourceType":"...","excerpt":"...","url":"..."}], "provenance": {"count": ${items.length}} } . personalSummary: 1-2 short sentences (<=200 chars). personalInterests: up to 6 human-friendly interests. evidence: up to 3 representative excerpts (<=200 chars each).`;
     const finalText = await summarizeWithModel(finalPrompt, { max_tokens: 220, model: 'gpt-3.5-turbo' });
-    const match = finalText.match(/\{[\s\S]*\}/m);
-    if (!match) {
-      return { personalSummary: clusterSummaries.slice(0,3).map(c => c.summary).join(' '), personalInterests: [], seedInterests: seedInterests || [], evidence: finalItems.slice(0,3).map(s => ({ id: s.id, sourceType: s.sourceType, excerpt: s.text.slice(0,200), url: s.url })), provenance: { count: items.length } };
+    const rawFinalText = typeof finalText === 'string' ? finalText : '';
+
+    // Helper: attempt to extract JSON substring and sanitize common JSON formatting issues
+    function sanitizeJsonString(s) {
+      if (!s || typeof s !== 'string') return null;
+      // extract first {...} block
+      const m = s.match(/\{[\s\S]*\}/m);
+      let candidate = m ? m[0] : s;
+      // common fixes
+      // remove backticks
+      candidate = candidate.replace(/`/g, '');
+      // replace smart quotes with standard quotes
+      candidate = candidate.replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
+      // remove trailing commas in objects/arrays
+      candidate = candidate.replace(/,\s*\]/g, ']');
+      candidate = candidate.replace(/,\s*\}/g, '}');
+      // remove unexpected control chars
+      candidate = candidate.replace(/[\x00-\x1F\x7F]/g, '');
+      // ensure property names are double-quoted (best-effort): replace 'key': or key: at line-start/after { or ,
+      candidate = candidate.replace(/([\{,\s])(\s*)([A-Za-z0-9_\-]+)\s*\:/g, '$1"$3":');
+      // convert single quotes around values to double quotes when safe (heuristic)
+      candidate = candidate.replace(/:\s*'([^']*)'/g, ': "$1"');
+      return candidate;
     }
-    const parsed = JSON.parse(match[0]);
-    return { personalSummary: parsed.personalSummary || '', personalInterests: parsed.personalInterests || [], seedInterests: seedInterests || [], evidence: parsed.evidence || [], provenance: parsed.provenance || { count: items.length } };
+
+    let parsed = null;
+    let parseError = null;
+    const match = rawFinalText.match(/\{[\s\S]*\}/m);
+    if (match) {
+      const rawJson = match[0];
+      try {
+        parsed = JSON.parse(rawJson);
+      } catch (e1) {
+        // try sanitizing
+        try {
+          const cleaned = sanitizeJsonString(rawFinalText);
+          parsed = JSON.parse(cleaned);
+        } catch (e2) {
+          parseError = e2.message || e1.message || 'JSON parse failed';
+          parsed = null;
+        }
+      }
+    } else {
+      // If no {} block, try sanitizing whole text
+      try {
+        const cleaned = sanitizeJsonString(rawFinalText);
+        parsed = cleaned ? JSON.parse(cleaned) : null;
+      } catch (e) {
+        parseError = e.message || 'No JSON found';
+        parsed = null;
+      }
+    }
+
+    if (!parsed) {
+      // deterministic fallback: build artifact from cluster summaries and seed interests
+      const fallbackSummary = clusterSummaries.slice(0,3).map(c => c.summary).filter(Boolean).join(' ');
+      const fallbackInterests = (seedInterests && seedInterests.length) ? seedInterests : (function(){
+        // token-frequency fallback from combined
+        const stop = new Set(['the','and','a','an','in','on','with','for','of','to','by','from','my','we','i','is','are','this','that','be','as','at','about']);
+        const tokens = combined.split(/[^A-Za-z\-]+/).map(t => t.trim()).filter(t => t && t.length>2).map(t => t.toLowerCase());
+        const counts = {};
+        for (const tk of tokens) if (!stop.has(tk)) counts[tk] = (counts[tk] || 0) + 1;
+        return Object.keys(counts).sort((a,b)=>counts[b]-counts[a]).slice(0,6).map(s => s.split('-').map(p=>p.charAt(0).toUpperCase()+p.slice(1)).join(' '));
+      })();
+      const fallbackEvidence = finalItems.slice(0,3).map(s => ({ id: s.id, sourceType: s.sourceType, excerpt: (s.text || '').slice(0,200), url: s.url }));
+      return { personalSummary: fallbackSummary || '', personalInterests: fallbackInterests || [], seedInterests: seedInterests || [], evidence: fallbackEvidence, provenance: { count: items.length, parsed: false }, rawFinalText, error: parseError || 'Failed to parse JSON from model' };
+    }
+
+    // If parsed successfully, normalize and return with seedInterests and provenance
+    return { personalSummary: parsed.personalSummary || '', personalInterests: parsed.personalInterests || [], seedInterests: seedInterests || [], evidence: parsed.evidence || [], provenance: parsed.provenance || { count: items.length }, rawFinalText };
   } catch (err) {
     // graceful fallback
     return { personalSummary: '', personalInterests: [], evidence: [], provenance: { count: Array.isArray(items) ? items.length : 0 }, error: err.message };

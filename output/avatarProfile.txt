@@ -1,9 +1,9 @@
-Name: Kevin B.
-Affiliation: D'Amore-McKim School of Business at Northeastern University
-Department: Professor
+Name: Stephen Demarest
+Affiliation: Tentarix Biotherapeutics, Inc.
+jobTitle: Chief Scientific Officer
 
-Work Skills: Strategy, Analytics, Statistics, Economics, Start-ups, Design Of Experiments
-Personal Skills: Research, Consulting, Entrepreneurship, Mobile Devices, Inferred
+Work interests: Protein Engineering, Biochemistry, Antibodies, Biotechnology, Drug Discovery, Assay Development
+Personal Interests: Community Engagement, Research, Biotech Innovation, Leadership Opportunities, Precision Oncology, Drug Development
 
 Bio:
-I teach and research in the field of business strategy and analytics.
+I lead a talented team in biotech innovation for precision oncology and immunology.

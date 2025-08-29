@@ -1,4 +1,3 @@
-
 // Entry point: orchestrates data collection and profile generation
 const { callLinkedInApi } = require('./api/linkedinApi');
 const { buildProfile } = require('./data/profileBuilder');
@@ -8,6 +7,49 @@ const { synthesizePersonalProfile } = require('./services/summarizer');
 const fs = require('fs');
 
 require('dotenv').config();
+
+const WRITE_DEBUG_OUTPUTS = process.env.WRITE_DEBUG_OUTPUTS === 'true';
+
+// Ensure output dir exists when debug writes are enabled
+function ensureOutputDir() {
+  try {
+    if (!fs.existsSync('./output')) fs.mkdirSync('./output', { recursive: true });
+  } catch (e) {
+    console.log('WARN: could not create output directory:', e.message);
+  }
+}
+
+// Safely redact sensitive fields from raw data before writing to disk
+function redactRawData(obj) {
+  const seen = new WeakSet();
+  function _redact(v) {
+    if (v && typeof v === 'object') {
+      if (seen.has(v)) return null;
+      seen.add(v);
+      if (Array.isArray(v)) return v.map(_redact);
+      const out = {};
+      for (const [k, val] of Object.entries(v)) {
+        const lk = String(k).toLowerCase();
+        // redact obvious sensitive keys
+        if (lk.includes('token') || lk.includes('secret') || lk.includes('api') || lk.includes('key') || lk.includes('access') || lk.includes('refresh') || lk.includes('password')) {
+          out[k] = '[REDACTED]';
+          continue;
+        }
+        // avoid writing full embeddings
+        if (lk === 'embeddings' && Array.isArray(val)) {
+          out[k] = '[EMBEDDINGS REDACTED]';
+          continue;
+        }
+        try { out[k] = _redact(val); } catch (e) { out[k] = null; }
+      }
+      return out;
+    }
+    return v;
+  }
+  try { return _redact(obj); } catch (e) { return {}; }
+}
+
+if (WRITE_DEBUG_OUTPUTS) ensureOutputDir();
 
 async function main(username) {
   // Fetch and aggregate data from all relevant endpoints with graceful error handling
@@ -20,13 +62,12 @@ async function main(username) {
     { key: 'volunteers', path: '/api/v1/user/volunteers' },
     { key: 'skills', path: '/api/v1/user/skills' },
     // personal-content endpoints (optional, may be empty)
-  { key: 'posts', path: '/api/v1/user/posts' },
-  { key: 'comments', path: '/api/v1/user/comments' },
-  { key: 'replies', path: '/api/v1/user/replies' },
-  { key: 'recommendations', path: '/api/v1/user/recommendations' },
-  { key: 'images', path: '/api/v1/user/images' },
-  { key: 'videos', path: '/api/v1/user/videos' },
-  { key: 'reactions', path: '/api/v1/user/reactions' }
+    { key: 'posts', path: '/api/v1/user/posts' },
+    { key: 'comments', path: '/api/v1/user/comments' },
+    { key: 'recommendations', path: '/api/v1/user/recommendations' },
+    { key: 'images', path: '/api/v1/user/images' },
+    { key: 'videos', path: '/api/v1/user/videos' },
+    { key: 'reactions', path: '/api/v1/user/reactions' }
   ];
   for (const endpoint of endpoints) {
     try {
@@ -38,6 +79,16 @@ async function main(username) {
     } catch (err) {
       console.log(`WARN: Failed to fetch ${endpoint.key}:`, err.message);
       rawData[endpoint.key] = endpoint.key === 'contact' ? {} : [];
+    }
+  }
+
+  // Write raw scraped LinkedIn data for debugging (redacted)
+  if (WRITE_DEBUG_OUTPUTS) {
+    try {
+      fs.writeFileSync('./output/raw_linkedin_data.json', JSON.stringify(redactRawData(rawData), null, 2));
+      console.log('INFO: wrote output/raw_linkedin_data.json');
+    } catch (e) {
+      console.log('WARN: failed to write raw_linkedin_data.json:', e.message);
     }
   }
 
@@ -55,9 +106,6 @@ async function main(username) {
     // Comments and replies
     if (Array.isArray(rawData.comments)) {
       for (const c of rawData.comments) items.push({ id: c.id || '', sourceType: 'comment', text: c.text || c.comment || c.body || '', created_at: c.created_at || c.date, engagement: c.likes || c.reactions || 0, url: c.url || '' });
-    }
-    if (Array.isArray(rawData.replies)) {
-      for (const r of rawData.replies) items.push({ id: r.id || '', sourceType: 'reply', text: r.text || r.body || '', created_at: r.created_at || r.date, engagement: r.likes || r.reactions || 0, url: r.url || '' });
     }
     // Recommendations / testimonials
     if (Array.isArray(rawData.recommendations)) {
@@ -92,9 +140,29 @@ async function main(username) {
   profile.personalSeedInterests = personalSummaryArtifact.seedInterests || [];
   profile.personalEvidence = personalSummaryArtifact.evidence || [];
 
+  // Write summarizer artifact
+  if (WRITE_DEBUG_OUTPUTS) {
+    try {
+      fs.writeFileSync('./output/summarizer_artifact.json', JSON.stringify(personalSummaryArtifact, null, 2));
+      console.log('INFO: wrote output/summarizer_artifact.json');
+    } catch (e) {
+      console.log('WARN: failed to write summarizer_artifact.json:', e.message);
+    }
+  }
+
   // Prepare prompt
   const prompt = makeProfilePrompt(profile);
   console.log('INFO: prepared prompt (redacted)');
+
+  // Write final prompt to disk for inspection
+  if (WRITE_DEBUG_OUTPUTS) {
+    try {
+      fs.writeFileSync('./output/final_prompt.txt', prompt, 'utf8');
+      console.log('INFO: wrote output/final_prompt.txt');
+    } catch (e) {
+      console.log('WARN: failed to write final_prompt.txt:', e.message);
+    }
+  }
 
   // Helper: try to extract first JSON object from text
   function extractJsonObject(text) {
@@ -115,7 +183,7 @@ async function main(username) {
     const out = {};
     out.Name = typeof obj.Name === 'string' ? obj.Name : '[Unknown]';
     out.Affiliation = typeof obj.Affiliation === 'string' ? obj.Affiliation : profile.affiliation || '[Unknown]';
-    out.JobTitle = typeof obj.JobTitle === 'string' ? obj.JobTitle : profile.department || '[Unknown]';
+    out.JobTitle = typeof obj.JobTitle === 'string' ? obj.JobTitle : (profile.jobTitleOrMajor || profile.jobTitle || '[Unknown]');
 
     const normalizeArray = (arr, max) => {
       if (!Array.isArray(arr)) return [];
@@ -128,8 +196,8 @@ async function main(username) {
       return [...new Set(cleaned)].slice(0, max);
     };
 
-  out.WorkInterests = normalizeArray(Array.isArray(obj.WorkInterests) ? obj.WorkInterests : [], 12);
-  out.PersonalInterests = normalizeArray(Array.isArray(obj.PersonalInterests) ? obj.PersonalInterests : [], 8);
+    out.WorkInterests = normalizeArray(Array.isArray(obj.WorkInterests) ? obj.WorkInterests : [], 12);
+    out.PersonalInterests = normalizeArray(Array.isArray(obj.PersonalInterests) ? obj.PersonalInterests : [], 8);
 
     out.Bio = typeof obj.Bio === 'string' ? obj.Bio.trim() : '';
     out.FunFact = typeof obj.FunFact === 'string' ? obj.FunFact.trim() : '';
@@ -143,6 +211,17 @@ async function main(username) {
   const maxAttempts = 2;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     aiText = await getOpenAiCompletion(prompt);
+
+    // Save raw AI response on each attempt (overwrite with latest)
+    if (WRITE_DEBUG_OUTPUTS && aiText) {
+      try {
+        fs.writeFileSync('./output/ai_raw_response.txt', aiText, 'utf8');
+        console.log('INFO: wrote output/ai_raw_response.txt');
+      } catch (e) {
+        console.log('WARN: failed to write ai_raw_response.txt:', e.message);
+      }
+    }
+
     // try direct parse first
     try {
       aiJson = typeof aiText === 'string' ? JSON.parse(aiText) : null;
@@ -175,7 +254,7 @@ async function main(username) {
     aiJson = {
       Name: profile.name || '[Unknown]',
       Affiliation: profile.affiliation || '[Unknown]',
-      JobTitle: profile.department || '[Unknown]',
+      JobTitle: profile.jobTitleOrMajor || profile.jobTitle || '[Unknown]',
       WorkInterests: profile.topSkills || profile.workInterests || [],
       PersonalInterests: profile.personalInterests || [],
       Bio: profile.bio || '',
@@ -187,7 +266,7 @@ async function main(username) {
   const finalProfile = {
     name: profile.name || aiJson.Name || '[Unknown]',
     affiliation: profile.affiliation || aiJson.Affiliation || '[Unknown]',
-    department: profile.department || aiJson.JobTitle || '[Unknown]',
+    jobTitle: profile.jobTitleOrMajor || profile.jobTitle || aiJson.JobTitle || '[Unknown]',
     workInterests: Array.isArray(aiJson.WorkInterests) && aiJson.WorkInterests.length ? aiJson.WorkInterests : (profile.topSkills || profile.workInterests || []),
     personalInterests: Array.isArray(aiJson.PersonalInterests) && aiJson.PersonalInterests.length ? aiJson.PersonalInterests : (profile.personalInterests || []),
     bio: aiJson.Bio || profile.bio || '',
@@ -195,6 +274,28 @@ async function main(username) {
     rawData: rawData,
     aiRaw: aiText
   };
+
+  // Filter out items that are clearly professional/work interests so personalInterests are distinct
+  function normalizeForCompare(s) {
+    if (!s || typeof s !== 'string') return '';
+    return s.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
+  }
+  const workSet = new Set((finalProfile.workInterests || []).map(normalizeForCompare));
+  const topSet = new Set((profile.topSkills || []).map(normalizeForCompare));
+  const jobNorm = normalizeForCompare(finalProfile.jobTitle || '');
+  const rawPersonal = Array.isArray(finalProfile.personalInterests) ? finalProfile.personalInterests : [];
+  const filteredPersonal = rawPersonal.map(p => (typeof p === 'string' ? p.trim() : p)).filter(Boolean).filter(pi => {
+    const n = normalizeForCompare(pi);
+    if (!n) return false;
+    if (workSet.has(n) || topSet.has(n)) return false;
+    if (jobNorm && (n === jobNorm || n.includes(jobNorm))) return false;
+    return true;
+  });
+  if (filteredPersonal.length === 0) {
+    finalProfile.personalInterests = ["No personal interests mentioned within user's LinkedIn Data"];
+  } else {
+    finalProfile.personalInterests = filteredPersonal;
+  }
 
   // Build provenance object describing where key fields came from
   const provenance = { personalInterests: 'none', funFact: 'none' };
@@ -258,15 +359,26 @@ async function main(username) {
     finalProfile.bio = finalProfile.bio.replace(/^,\s*/, '');
   }
 
+  // Write final_profile.json for debugging
+  if (WRITE_DEBUG_OUTPUTS) {
+    try {
+      fs.writeFileSync('./output/final_profile.json', JSON.stringify(finalProfile, null, 2));
+      console.log('INFO: wrote output/final_profile.json');
+    } catch (e) {
+      console.log('WARN: failed to write final_profile.json:', e.message);
+    }
+  }
+
   // Save output
   fs.writeFileSync('./output/avatarProfile.json', JSON.stringify(finalProfile, null, 2));
   console.log('Avatar profile saved to output/avatarProfile.json');
 
   // Save a .txt file with key profile fields
-  const txt = `Name: ${finalProfile.name || '[Not found]'}\nAffiliation: ${finalProfile.affiliation || '[Not found]'}\nDepartment: ${finalProfile.department || '[Not found]'}\n\nWork Skills: ${Array.isArray(finalProfile.workInterests) ? finalProfile.workInterests.join(', ') : '[None]'}\nPersonal Skills: ${Array.isArray(finalProfile.personalInterests) ? finalProfile.personalInterests.join(', ') : '[None]'}\n\nBio:\n${finalProfile.bio || '[No bio generated]'}\n`;
+  const txt = `Name: ${finalProfile.name || '[Not found]'}\nAffiliation: ${finalProfile.affiliation || '[Not found]'}\njobTitle: ${finalProfile.jobTitle || '[Not found]'}\n\nWork interests: ${Array.isArray(finalProfile.workInterests) ? finalProfile.workInterests.join(', ') : '[None]'}\nPersonal Interests: ${Array.isArray(finalProfile.personalInterests) ? finalProfile.personalInterests.join(', ') : '[None]'}\n\nBio:\n${finalProfile.bio || '[No bio generated]'}\n`;
   fs.writeFileSync('./output/avatarProfile.txt', txt);
   console.log('Avatar profile saved to output/avatarProfile.txt');
 }
 
-// Example usage: replace with actual username or public identifier
-main('kevin-b-707b29').catch(console.error);
+// Get target profile from environment variable or use default
+const targetProfile = process.env.TARGET_PROFILE || 'kevin-b-707b29';
+main(targetProfile).catch(console.error);

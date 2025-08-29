@@ -14,12 +14,25 @@ function buildProfile(rawData) {
     else if (first || last) name = [first, last].filter(Boolean).join(' ');
   }
   
-  // Affiliation and department from first experience
-  let affiliation = '';
-  let department = '';
+  // Job title or major: prefer current/most recent experience title, else try education major/degree
+  let jobTitleOrMajor = '';
   if (rawData.experience && rawData.experience.length > 0) {
-    affiliation = rawData.experience[0].company?.name || '';
-    department = rawData.experience[0].title || '';
+    jobTitleOrMajor = rawData.experience[0].title || rawData.experience[0].jobTitle || '';
+  }
+  // If no experience title, try to infer from education (major/fieldOfStudy/degree)
+  if (!jobTitleOrMajor && Array.isArray(rawData.educations) && rawData.educations.length > 0) {
+    const edu = rawData.educations[0];
+    const major = edu.major || edu.fieldOfStudy || edu.field || edu.areaOfStudy || '';
+    const degree = edu.degree || edu.degreeName || '';
+    if (major && degree) jobTitleOrMajor = `${degree}${major ? ' in ' + major : ''}`;
+    else if (major) jobTitleOrMajor = major;
+    else if (degree) jobTitleOrMajor = degree;
+  }
+  
+  // Affiliation from first experience company
+  let affiliation = '';
+  if (rawData.experience && rawData.experience.length > 0) {
+    affiliation = rawData.experience[0].company?.name || rawData.experience[0].company || '';
   }
   // Work interests: skills from /skills and experience, normalized
   let workInterests = [];
@@ -55,9 +68,25 @@ function buildProfile(rawData) {
     personalInterests = personalInterests.concat(rawData.publications.map(p => p.title || p.publication || p.description || p));
   }
   if (Array.isArray(rawData.educations)) {
-    personalInterests = personalInterests.concat(rawData.educations.map(e => e.activities || ''));
+    personalInterests = personalInterests.concat(rawData.educations.map(e => e.activities || e.extracurriculars || e.projects || ''));
   }
-  personalInterests = [...new Set(personalInterests)].filter(Boolean);
+  // Also try to harvest interests from the contact record (headline, summary, interests)
+  if (rawData.contact) {
+    const c = rawData.contact;
+    if (c.headline) personalInterests.push(c.headline);
+    if (c.summary || c.about) personalInterests.push(c.summary || c.about);
+    if (Array.isArray(c.interests)) personalInterests = personalInterests.concat(c.interests);
+    if (typeof c.interests === 'string') personalInterests.push(c.interests);
+  }
+  // If posts are present, pull frequent hashtags or topics (simple heuristic)
+  if (Array.isArray(rawData.posts)) {
+    for (const p of rawData.posts.slice(0, 80)) {
+      const text = (p.text || p.content || '').toString();
+      const tags = (text.match(/#\w+/g) || []).map(t => t.replace('#',''));
+      personalInterests = personalInterests.concat(tags);
+    }
+  }
+  personalInterests = [...new Set(personalInterests)].filter(Boolean).map(s => typeof s === 'string' ? s.trim() : s);
   // Education: degree and school
   let educationArr = [];
   if (Array.isArray(rawData.educations)) {
@@ -65,17 +94,19 @@ function buildProfile(rawData) {
   }
   // Honors: not available, leave blank
   let honorsArr = [];
-  // Bio: use description from first experience or education
+  // Bio: use description from first experience or education or contact summary
   let bio = '';
   if (rawData.experience && rawData.experience.length > 0) {
-    bio = rawData.experience[0].description || '';
+    bio = rawData.experience[0].description || rawData.experience[0].summary || '';
   } else if (rawData.educations && rawData.educations.length > 0) {
-    bio = rawData.educations[0].description || '';
+    bio = rawData.educations[0].description || rawData.educations[0].summary || '';
+  } else if (rawData.contact) {
+    bio = rawData.contact.summary || rawData.contact.about || '';
   }
   return {
     name,
     affiliation,
-    department,
+    jobTitleOrMajor,
     workInterests,
     personalInterests,
     education: educationArr,
