@@ -70,7 +70,12 @@ function makeBioPrompt(profile, personalSummary) {
   const bioSource = profile.bio || personalSummary || '';
   const job = profile.jobTitleOrMajor || profile.department || '';
   const affiliation = profile.affiliation || '';
-  return `Rewrite the following into exactly 2-3 short, casual first-person sentences beginning with an activity phrase (e.g., "I research...", "I lead..."). Do NOT include the person's name. Avoid lists or tool stacks. Return ONLY the rewritten bio text (no JSON, no explanation).\n\nOriginal bio/source:\n"${bioSource.replace(/"/g,'\"')}"\n\nContext: job/title: ${job}; affiliation: ${affiliation}`;
+  return `Rewrite the following into exactly 2-3 short, casual first-person sentences beginning with an activity phrase (e.g., "I research...", "I lead..."). Do NOT include the person's name, employer/company names, or job titles. Avoid lists or tool stacks. Focus on personal activities, motivations, and human-friendly framing. Return ONLY the rewritten bio text (no JSON, no explanation).
+
+Original bio/source:
+"${bioSource.replace(/"/g,'\\"')}"
+
+Context (for reference only — DO NOT repeat in the bio): job/title: ${job}; affiliation: ${affiliation}`;
 }
 
 function makeFinalMergePrompt(profile, workInterests, personalInterests, bio, evidence) {

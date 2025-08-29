@@ -4,6 +4,8 @@ require('dotenv').config();
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_EMBED_URL = 'https://api.openai.com/v1/embeddings';
 const OPENAI_CHAT_URL = 'https://api.openai.com/v1/chat/completions';
+const fs = require('fs');
+const WRITE_DEBUG_OUTPUTS = process.env.WRITE_DEBUG_OUTPUTS === 'true';
 
 // Minimal k-means implementation to avoid adding heavy deps
 function kmeans(items, k, maxIter = 50) {
@@ -150,6 +152,62 @@ async function synthesizePersonalProfile(items, opts = {}) {
 
     // Combine cluster summaries into a single text used for deterministic extraction and final synthesis
     const combined = clusterSummaries.map(c => c.summary).join('\n');
+
+    // When debugging is enabled, write a compact cluster artifact for inspection.
+    try {
+      if (WRITE_DEBUG_OUTPUTS) {
+        // helper: shrink vectors to limited dims and precision
+        function shrinkVector(v, maxDims = 64, precision = 4) {
+          if (!Array.isArray(v)) return [];
+          return v.slice(0, maxDims).map(x => Number(Number(x).toFixed(precision)));
+        }
+
+        const clusterArtifacts = [];
+        for (let ci = 0; ci < clusters.length; ci++) {
+          const memIdx = Array.isArray(clusters[ci]) ? clusters[ci].slice(0, 10) : [];
+          // compute centroid for this cluster from finalEmbeddings
+          let centroid = [];
+          if (memIdx.length > 0) {
+            const dim = finalEmbeddings[0] ? finalEmbeddings[0].length : 0;
+            centroid = new Array(dim).fill(0);
+            for (const mi of memIdx) {
+              const e = finalEmbeddings[mi] || [];
+              for (let d = 0; d < dim; d++) centroid[d] += (e[d] || 0);
+            }
+            for (let d = 0; d < centroid.length; d++) centroid[d] = centroid[d] / memIdx.length;
+          }
+
+          const members = memIdx.map(mi => {
+            const it = finalItems[mi] || {};
+            return { id: it.id || '', sourceType: it.sourceType || '', excerpt: (it.text || '').slice(0, 200), url: it.url || '' };
+          });
+
+          clusterArtifacts.push({
+            clusterIndex: ci,
+            summary: clusterSummaries[ci] ? clusterSummaries[ci].summary : (clusterSummaries[ci] || {}).summary || '',
+            centroid: shrinkVector(centroid, 64, 4),
+            members
+          });
+        }
+
+        const artifact = {
+          timestamp: new Date().toISOString(),
+          itemCount: items.length,
+          selectedCount: finalItems.length,
+          seedInterests: seedInterests || [],
+          clusters: clusterArtifacts.slice(0, 12)
+        };
+
+        try {
+          if (!fs.existsSync('./output')) fs.mkdirSync('./output', { recursive: true });
+          fs.writeFileSync('./output/cluster_artifacts.json', JSON.stringify(artifact, null, 2));
+        } catch (e) {
+          // swallow write errors; debug output should not break pipeline
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
 
     // Before final synthesis: try to extract deterministic seed interests from cluster summaries
     let seedInterests = [];

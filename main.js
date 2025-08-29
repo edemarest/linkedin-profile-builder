@@ -1,7 +1,7 @@
 // Entry point: orchestrates data collection and profile generation
 const { callLinkedInApi } = require('./api/linkedinApi');
 const { buildProfile } = require('./data/profileBuilder');
-const { makeProfilePrompt } = require('./data/prompts');
+const { makeProfilePrompt, makeWorkPrompt, makePersonalPrompt, makeBioPrompt, makeFinalMergePrompt } = require('./data/prompts');
 const { getOpenAiCompletion } = require('./openai/openaiClient');
 const { synthesizePersonalProfile } = require('./services/summarizer');
 const fs = require('fs');
@@ -164,6 +164,94 @@ async function main(username) {
     }
   }
 
+  // --- New: 4-call pipeline ---
+  // 1) Work interests synthesis
+  let workInterestsCandidates = [];
+  try {
+    const workPrompt = makeWorkPrompt(profile);
+    const workText = await getOpenAiCompletion(workPrompt, { temperature: 0.0, max_tokens: 120 });
+    if (WRITE_DEBUG_OUTPUTS) fs.writeFileSync('./output/work_raw.txt', workText || '', 'utf8');
+    let parsedWork = null;
+    try { parsedWork = JSON.parse(workText); } catch (e) { parsedWork = extractJsonObject(workText); }
+    if (parsedWork && Array.isArray(parsedWork.WorkInterests)) workInterestsCandidates = parsedWork.WorkInterests.slice(0,6);
+  } catch (e) { console.log('WARN: work interests synthesis failed:', e.message); }
+  if (workInterestsCandidates.length === 0) workInterestsCandidates = profile.topSkills || profile.workInterests || [];
+
+  // 2) Personal interests / seeds extraction
+  let personalSummary = profile.personalSummary || '';
+  let personalSeeds = profile.personalSeedInterests || [];
+  let personalInterestsCandidates = [];
+  try {
+    const personalPrompt = makePersonalPrompt(personalSummary ? { personalSummary } : (personalSeeds || {}), profile);
+    const personalText = await getOpenAiCompletion(personalPrompt, { temperature: 0.0, max_tokens: 180 });
+    if (WRITE_DEBUG_OUTPUTS) fs.writeFileSync('./output/personal_raw.txt', personalText || '', 'utf8');
+    let parsedPersonal = null;
+    try { parsedPersonal = JSON.parse(personalText); } catch (e) { parsedPersonal = extractJsonObject(personalText); }
+    if (parsedPersonal) {
+      personalSummary = parsedPersonal.personalSummary || personalSummary;
+      personalSeeds = parsedPersonal.seedInterests || personalSeeds;
+      if (Array.isArray(parsedPersonal.personalInterests)) personalInterestsCandidates = parsedPersonal.personalInterests.slice(0,6);
+    }
+  } catch (e) { console.log('WARN: personal interests extraction failed:', e.message); }
+  if (personalInterestsCandidates.length === 0 && Array.isArray(personalSeeds) && personalSeeds.length) personalInterestsCandidates = personalSeeds.slice(0,6);
+
+  // 3) Bio generation / rewrite (ensure 2-3 short first-person sentences)
+  let finalBio = profile.bio || personalSummary || '';
+  function countSentences(s) { if (!s || typeof s !== 'string') return 0; return s.split(/[\.\?!]+\s+/).filter(Boolean).length; }
+  if (countSentences(finalBio) < 2) {
+    try {
+      const bioPrompt = makeBioPrompt(profile, personalSummary);
+      const bioText = await getOpenAiCompletion(bioPrompt, { temperature: 0.0, max_tokens: 80 });
+      if (WRITE_DEBUG_OUTPUTS) fs.writeFileSync('./output/bio_raw.txt', bioText || '', 'utf8');
+      if (bioText && countSentences(bioText) >= 2 && countSentences(bioText) <= 3) finalBio = bioText.trim();
+      else {
+        // try once more with stricter instruction
+        const bioPrompt2 = bioPrompt + '\n\nPlease return exactly 2 short sentences.';
+        const bioText2 = await getOpenAiCompletion(bioPrompt2, { temperature: 0.0, max_tokens: 80 });
+        if (WRITE_DEBUG_OUTPUTS) fs.writeFileSync('./output/bio_raw_retry.txt', bioText2 || '', 'utf8');
+        if (bioText2 && countSentences(bioText2) >= 2 && countSentences(bioText2) <= 3) finalBio = bioText2.trim();
+      }
+    } catch (e) { console.log('WARN: bio rewrite failed:', e.message); }
+    // deterministic fallback
+    if (!finalBio || countSentences(finalBio) < 2) {
+      const focus = (workInterestsCandidates && workInterestsCandidates.length) ? workInterestsCandidates[0] : (profile.topSkills && profile.topSkills[0]) || '';
+      finalBio = `I work on ${focus}. I lead scientific efforts at ${profile.affiliation || 'my organization'} focused on impactful therapeutics.`;
+    }
+  }
+
+  // 4) Final merge prompt
+  let finalAiText = '';
+  let finalAiJson = null;
+  try {
+    const finalPrompt = makeFinalMergePrompt(profile, workInterestsCandidates, personalInterestsCandidates, finalBio, profile.personalEvidence || []);
+    if (WRITE_DEBUG_OUTPUTS) fs.writeFileSync('./output/final_merge_prompt.txt', finalPrompt, 'utf8');
+    finalAiText = await getOpenAiCompletion(finalPrompt, { temperature: 0.0, max_tokens: 260 });
+    if (WRITE_DEBUG_OUTPUTS) fs.writeFileSync('./output/final_ai_raw.txt', finalAiText || '', 'utf8');
+    try { finalAiJson = JSON.parse(finalAiText); } catch (e) { finalAiJson = extractJsonObject(finalAiText); }
+  } catch (e) { console.log('WARN: final merge call failed:', e.message); }
+
+  // If finalAiJson not valid, fallback to deterministic assembly
+  if (!finalAiJson) {
+    finalAiJson = {
+      Name: profile.name || '[Unknown]',
+      Affiliation: profile.affiliation || '',
+      JobTitle: profile.jobTitleOrMajor || profile.department || '',
+      WorkInterests: workInterestsCandidates.slice(0,6),
+      PersonalInterests: (personalInterestsCandidates.length ? personalInterestsCandidates.slice(0,6) : (profile.personalSeedInterests && profile.personalSeedInterests.length ? profile.personalSeedInterests.slice(0,6) : [])),
+      Bio: finalBio,
+      FunFact: '',
+      Provenance: { PersonalInterests: Array.isArray(personalSeeds) && personalSeeds.length ? 'seed' : 'none', FunFact: 'none' }
+    };
+  }
+
+  // ensure aiJson exists before assigning below
+  let aiJson = null;
+  // use existing validateAndNormalize to clean finalAiJson
+  const validated = validateAndNormalize(finalAiJson);
+  if (validated) aiJson = validated;
+
+  // --- end of 4-call pipeline ---
+
   // Helper: try to extract first JSON object from text
   function extractJsonObject(text) {
     if (!text || typeof text !== 'string') return null;
@@ -207,7 +295,6 @@ async function main(username) {
 
   // Attempt to get a valid JSON response from the model, with limited retries
   let aiText = '';
-  let aiJson = null;
   const maxAttempts = 2;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     aiText = await getOpenAiCompletion(prompt);
@@ -358,6 +445,49 @@ async function main(username) {
     // If bio starts with a stray comma or 'is', clean it
     finalProfile.bio = finalProfile.bio.replace(/^,\s*/, '');
   }
+
+  // Post-process bio to remove employer/company names and job titles if present
+  function stripCompanyAndTitle(bioText) {
+    if (!bioText || typeof bioText !== 'string') return bioText;
+    let out = bioText;
+    const company = (profile.affiliation || '').trim();
+    const title = (profile.jobTitleOrMajor || profile.jobTitle || '').trim();
+    // remove exact company and title occurrences (case-insensitive)
+    try {
+      if (company) out = out.replace(new RegExp(company.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '');
+      if (title) out = out.replace(new RegExp(title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '');
+    } catch (e) { /* ignore regex errors */ }
+    // remove common company suffixes that might remain
+    out = out.replace(/\b(Inc\.?|LLC\.?|Ltd\.?|Corp\.?|Co\.?|Incorporated)\b/gi, '');
+    // remove leftover punctuation doubles and trim
+    out = out.replace(/[ ,;:\-]{2,}/g, ' ').replace(/\s{2,}/g, ' ').trim();
+    // remove leading/trailing commas and periods
+    out = out.replace(/^[,\.\s]+/, '').replace(/[,\.\s]+$/, '');
+    return out;
+  }
+
+  // apply stripping and ensure sentence count; if invalid, deterministically rewrite
+  try {
+    const cleaned = stripCompanyAndTitle(finalProfile.bio || '');
+    const countSentencesLocal = (s) => { if (!s || typeof s !== 'string') return 0; return s.split(/[\.\?!]+\s*/).filter(Boolean).length; };
+    if (cleaned && cleaned !== finalProfile.bio) {
+      if (WRITE_DEBUG_OUTPUTS) {
+        try { fs.writeFileSync('./output/bio_cleaned_before.txt', `${finalProfile.bio}\n----\n${cleaned}`, 'utf8'); } catch (e) {}
+      }
+      finalProfile.bio = cleaned;
+    }
+    // Validate sentence count; if still not 2-3 sentences, produce deterministic rewrite without mentioning employer/title
+    if (countSentencesLocal(finalProfile.bio) < 2 || countSentencesLocal(finalProfile.bio) > 3) {
+      const focus = (workInterestsCandidates && workInterestsCandidates.length) ? workInterestsCandidates[0] : (profile.topSkills && profile.topSkills[0]) || '';
+      const activity = focus ? `I work on ${focus.toLowerCase()}.` : 'I work in my field.';
+      const motive = 'I focus on practical solutions that help patients and researchers.';
+      finalProfile.bio = `I ${activity.replace(/^I\s+/, '').replace(/\.$/, '')}. ${motive}`;
+      // ensure first-person sentences
+      if (WRITE_DEBUG_OUTPUTS) {
+        try { fs.writeFileSync('./output/bio_deterministic_fallback.txt', finalProfile.bio, 'utf8'); } catch (e) {}
+      }
+    }
+  } catch (e) { /* ignore */ }
 
   // Write final_profile.json for debugging
   if (WRITE_DEBUG_OUTPUTS) {
